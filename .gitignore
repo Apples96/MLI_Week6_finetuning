@@ -1,2 +1,5 @@
 .env
 MLIWeek6venv
+wandb
+models
+__pycache__

@@ -1,3 +1,7 @@
 transformers
 torch
 pillow
+peft
+torchvision
+datasets
+wandb
