@@ -6,6 +6,7 @@ Two implementations:
 """
 import torch
 import torch.nn as nn
+import math
 from transformers import CLIPProcessor, CLIPModel, AutoTokenizer, AutoModelForCausalLM
 from peft import (
     LoraConfig,
@@ -184,20 +185,33 @@ class lora_image_captioning_model(nn.Module):
             self.vision_encoder.config.hidden_size,
             self.text_model.config.hidden_size
         )
+
+        # After creating the projection layer, initialise this layer to relevant numbers, not random
+        with torch.no_grad():
+            # Scale the initial weights to preserve norms approximately
+            nn.init.xavier_uniform_(self.encoder_projection.weight)
+            # Or even better, use a statistical approach:
+            std = math.sqrt(2.0 / (self.vision_encoder.config.hidden_size + self.text_model.config.hidden_size))
+            self.encoder_projection.weight.normal_(0, std)
         
         # LoRA configuration
         self.peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
-            r=2,               # LoRA attention dimension (rank)
+            r=16,               # LoRA attention dimension (rank)
             lora_alpha=32,     # LoRA alpha parameter
             lora_dropout=0.1,  # Dropout probability for LoRA layers
             bias="none",       # Whether to train bias parameters
             # Which layers to apply LoRA to
             target_modules=[
+                "encoder_projection",
                 "q_proj",
                 "k_proj",
                 "v_proj",
+                "o_proj",
+                "gate_proj", 
+                "up_proj",
+                "down_proj"
             ],
         )
         

@@ -12,6 +12,7 @@ from tqdm import tqdm
 from pathlib import Path
 from datetime import datetime
 
+
 # Local imports
 from data import Flickr30k
 from models import image_captioning_model, lora_image_captioning_model
@@ -101,7 +102,7 @@ def train_lora_image_caption(
         train_dataset, 
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,       # Adjust based on your CPU cores
+        num_workers=4,       # Adjust based on your CPU cores
         pin_memory=True      # Speeds up CPU to GPU transfers
     )
     
@@ -109,7 +110,7 @@ def train_lora_image_caption(
         val_dataset, 
         batch_size=batch_size,
         shuffle=False,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True
     )
 
@@ -162,9 +163,11 @@ def train_lora_image_caption(
             # Print debug info for first batch of first epoch
             if epoch == 0 and batch_idx == 0:
                 print(f"First batch shapes:")
-                print(f"  Images: {tokenized_images.shape}")
+                print(f"  Images shape: {tokenized_images.shape}")
+                print(f"  Images: {images}")
                 print(f"  Input caption IDs: {prompt_input_ids.shape}")
                 print(f"  Target caption IDs: {prompt_target_ids.shape}")
+                print(f"  Target captions: {captions}")
                 print(f"  Caption logits: {caption_logits.shape}")
                 assert caption_logits.shape[1] == prompt_target_ids.shape[1], (
                     f"Caption logits shape {caption_logits.shape} and target IDs shape "
@@ -213,6 +216,11 @@ def train_lora_image_caption(
             # Log to W&B every 10 batches
             if batch_idx % 10 == 0:
                 wandb.log({"batch_loss": batch_loss, "step": epoch * len(train_loader) + batch_idx})
+
+            if batch_idx % 50 == 0:
+                with torch.no_grad():
+                    debug_caption = model.generate([images[0]], ["Debug this image:"])
+                    print(f"Debug caption: {debug_caption[0]}")
 
         # Calculate average training loss for the epoch
         avg_train_loss = train_loss / train_batches
@@ -305,11 +313,25 @@ def train_lora_image_caption(
     print("Training completed!")
 
 
+    # Test with a sample image and prompt
+    from PIL import Image
+    import requests
+    from io import BytesIO
+    
+    # Load a test image
+    response = requests.get("https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/dog.jpg")
+    image = Image.open(BytesIO(response.content)).convert("RGB")
+    
+    # Generate a caption
+    captions = model.generate([image], ["Describe this image:"])
+    print(f"Generated caption: {captions[0]}")
+
+
 if __name__ == "__main__":
     # This will run when the script is executed directly
     train_lora_image_caption(
-        batch_size=2,
+        batch_size=10,
         num_epochs=5,
         learning_rate=1e-4, 
-        max_samples=10  # Use small sample for quick testing
+        max_samples=10000  # Use small sample for quick testing
     )

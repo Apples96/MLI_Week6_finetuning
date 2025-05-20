@@ -1,111 +1,155 @@
+"""
+Streamlit app for image captioning with prompt guidance.
+This app allows users to upload an image and provide a text prompt
+to guide the caption generation process.
+"""
 import streamlit as st
 import torch
 from PIL import Image
 import os
-from transformers import CLIPProcessor, CLIPModel, AutoTokenizer, AutoModelForCausalLM
-from models import image_captioning_model
 import time
+from models import lora_image_captioning_model
 
 # Set page config
 st.set_page_config(
-    page_title="Image Captioning",
+    page_title="Prompt-Guided Image Captioning",
     page_icon="🖼️",
     layout="centered"
 )
 
 @st.cache_resource
 def load_model():
-    """Load the image captioning model and necessary processor"""
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    """Load the image captioning model"""
+    # Set device - try to use MPS for Mac, fall back to CPU
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        st.success("Using MPS (Apple Silicon GPU)")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        st.success("Using CUDA GPU")
+    else:
+        device = torch.device("cpu")
+        st.info("Using CPU")
     
-    # Load model and initla weights
-    model = image_captioning_model().to(device)
+    # Load model
+    model = lora_image_captioning_model().to(device)
+    
+    # Load model weights
+    model_path = "models/best_captioning_model.pt"
+    
+    if os.path.exists(model_path):
+        try:
+            checkpoint = torch.load(model_path, map_location=device)
+            
+            # Check if it's a state_dict or a checkpoint dictionary
+            if "model_state_dict" in checkpoint:
+                model.load_state_dict(checkpoint["model_state_dict"])
+                # Display additional metadata if available
+                training_info = {
+                    "Trained epochs": checkpoint.get("epoch", "Unknown"),
+                    "Validation loss": checkpoint.get("val_loss", "Unknown"),
+                    "Training date": checkpoint.get("timestamp", "Unknown")
+                }
+                st.sidebar.write("### Model Training Info")
+                for key, value in training_info.items():
+                    st.sidebar.write(f"**{key}:** {value}")
+            else:
+                model.load_state_dict(checkpoint)
+                
+            st.success(f"✅ Model loaded successfully from {model_path}")
+        except Exception as e:
+            st.error(f"⚠️ Error loading model: {str(e)}")
+            st.exception(e)
+    else:
+        st.warning(f"⚠️ Model file not found at {model_path}")
+        st.info("Running with untrained model weights for demonstration")
     
     # Set model to evaluation mode
     model.eval()
     
-    # Load processor
-    image_processor = image_captioning_model.image_processor
-    text_tokenizer = image_captioning_model.text_tokenizer
-    
-    return model, image_processor, text_tokenizer, device
+    return model, device
 
-def generate_caption(model, image_processor, text_tokenizer, image, device, max_length=50):
-    """Generate a caption for the given image"""
-    # Process image with CLIP processor
-    image_inputs = image_processor(
-        images=image,
-        return_tensors="pt",
-    )
+def generate_caption(model, image, prompt, device, max_tokens=50):
+    """
+    Generate a caption for the given image using the provided prompt.
     
-    # Move inputs to device
-    image_inputs = {k: v.to(device) for k, v in image_inputs.items()}
+    Args:
+        model: The image captioning model
+        image: PIL Image to caption
+        prompt: Text prompt to guide the captioning
+        device: Device to run inference on
+        max_tokens: Maximum number of tokens to generate
+        
+    Returns:
+        Generated caption string
+    """
+    # Move to device and time the generation
+    start_time = time.time()
     
-    # Get image features
-    tokenized_images = image_inputs["pixel_values"]
-    
-    # Create a properly padded sequence for the initial input
-    # Start with just the BOS token
-    generated_ids = [text_tokenizer.bos_token_id]
-    
-    # We need to match the expected text_seq_length from our model (76 tokens)
-    # The model expects this to be padded with padding tokens
-    # text_seq_length = model.text_seq_length  # Should be 76
-    
-    # Generate tokens auto-regressively
+    # Generate caption
     with torch.no_grad():
-        captions = model.generate(images, prompts, max_length=50)
-        # for _ in range(max_length):
-        #     # Pad the current sequence to the right length
-        #     current_length = len(generated_ids)
-        #     padding_length = text_seq_length - current_length
-            
-        #     # Create padded input_ids for this step
-        #     padded_input_ids = generated_ids + [tokenizer.pad_token_id] * padding_length
-        #     input_ids = torch.tensor([padded_input_ids[:text_seq_length]]).to(device)
-            
-        #     # Create a padding mask where real tokens are 1, padding tokens are 0
-        #     padding_mask = torch.ones(1, current_length).to(device)
-        #     if padding_length > 0:
-        #         padding_zeros = torch.zeros(1, padding_length).to(device)
-        #         padding_mask = torch.cat([padding_mask, padding_zeros], dim=1)
-            
-        #     # Forward pass
-        #     output_logits = model(tokenized_images, input_ids, padding_mask)
-            
-        #     # Get the prediction for the last REAL token (not padding)
-        #     next_token_logits = output_logits[0, current_length-1, :]
-            
-        #     # Get most likely token
-        #     next_token_id = torch.argmax(next_token_logits).item()
-            
-        #     # Add to generated sequence
-        #     generated_ids.append(next_token_id)
-            
-        #     # Stop if EOS token is generated
-        #     if next_token_id == tokenizer.eos_token_id:
-        #         break
+        captions = model.generate(
+            [image],  # Model expects a list of images
+            [prompt],  # Model expects a list of prompts
+            max_new_tokens=max_tokens
+        )
     
-    # DecKCn = tokenizer.decode(generated_ids, skip_special_tokens=True)
-    return captions
+    # Get the first caption from the batch
+    caption = captions[0]
+    
+    # Calculate generation time
+    generation_time = time.time() - start_time
+    
+    return caption, generation_time
 
 def main():
-    st.title("📸 Image Captioning App")
-    st.write("Upload an image or take a photo to get an AI-generated caption!")
+    st.title("🖼️ Prompt-Guided Image Captioning")
+    st.write("""
+    Upload an image and provide a text prompt to guide the caption generation.
+    Try prompts like "Describe this image:" or "What's happening in this scene?"
+    """)
     
-    # Debug mode toggle
+    # Debug mode toggle in sidebar
     debug_mode = st.sidebar.checkbox("Enable debug mode")
+    
+    # Sidebar options
+    st.sidebar.title("Options")
+    max_tokens = st.sidebar.slider("Maximum tokens to generate", 10, 100, 50)
     
     # Load model (cached)
     with st.spinner("Loading model..."):
-        model, processor, device = load_model()
+        model, device = load_model()
     
     # File uploader
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
     
     # Camera input option
     camera_image = st.camera_input("Or take a photo with your camera")
+    
+    # Prompt input
+    prompt = st.text_input(
+        "Enter a prompt to guide the caption generation",
+        value="Describe this image in detail:",
+        help="The prompt guides the model to generate a specific type of caption"
+    )
+    
+    # Example prompts
+    example_prompts = [
+        "Describe this image in detail:",
+        "What's happening in this scene?",
+        "Write a creative story about this image:",
+        "Explain what you see in this picture:",
+        "List the main objects visible in this image:"
+    ]
+    
+    selected_example = st.selectbox(
+        "Or try one of these example prompts:",
+        [""] + example_prompts
+    )
+    
+    if selected_example:
+        prompt = selected_example
+        st.info(f"Using prompt: '{prompt}'")
     
     # Process the uploaded image or camera image
     if uploaded_file is not None or camera_image is not None:
@@ -115,46 +159,65 @@ def main():
         image = Image.open(input_file).convert("RGB")
         
         # Display the image
-        st.image(image, caption="Your Image", use_container_width=True)
+        st.image(image, caption="Your Image", use_column_width=True)
         
         # Process image when user clicks the button
-        if st.button("Generate Caption"):
+        if st.button("Generate Caption", type="primary"):
             try:
-                with st.spinner("Analyzing image..."):
-                    # Show debug info if enabled
-                    if debug_mode:
-                        st.write("### Debug Information")
-                        # st.write(f"Model text_seq_length: {model.text_seq_length}")
-                        # st.write(f"Model image_seq_length: {model.image_seq_length}")
-                        st.write(f"Device: {device}")
-                    
-                    # Time the caption generation
-                    start_time = time.time()
-                    caption = generate_caption(model, processor, image, device)
-                    end_time = time.time()
-                    
-                    # Display the results
-                    st.success(f"Caption generated in {end_time - start_time:.2f} seconds")
-                    st.subheader("Generated Caption:")
-                    st.write(f"### {caption}")
+                progress_text = "Analyzing image..."
+                caption_placeholder = st.empty()
+                caption_placeholder.info(progress_text)
+                
+                # Show debug info if enabled
+                if debug_mode:
+                    st.write("### Debug Information")
+                    st.write(f"Device: {device}")
+                    st.write(f"Prompt: '{prompt}'")
+                    st.write(f"Max tokens: {max_tokens}")
+                
+                # Generate caption
+                caption, generation_time = generate_caption(
+                    model, image, prompt, device, max_tokens
+                )
+                
+                # Display the results
+                caption_placeholder.empty()
+                st.success(f"Caption generated in {generation_time:.2f} seconds")
+                
+                # Display the caption with the prompt removed if found at the beginning
+                display_caption = caption
+                if prompt in display_caption:
+                    # Remove the prompt from the beginning of the caption if present
+                    display_caption = display_caption.replace(prompt, "", 1).strip()
+                
+                st.subheader("Generated Caption:")
+                st.markdown(f"### {display_caption}")
+                
+                # Display raw output in debug mode
+                if debug_mode:
+                    st.write("### Raw Model Output:")
+                    st.text(caption)
+                
             except Exception as e:
                 st.error(f"Error generating caption: {str(e)}")
                 if debug_mode:
                     st.exception(e)
-                
-            # Add some information about the model
-            with st.expander("About this model"):
-                st.write("""
-                This image captioning model uses a Vision Transformer (ViT) from CLIP 
-                as the encoder, combined with a custom decoder architecture. The model 
-                has been trained on the Flickr30k dataset, which contains 31,000 images 
-                with 5 captions each.
-                
-                The model works by:
-                1. Encoding the image using CLIP's vision model
-                2. Using a masked self-attention mechanism to generate captions
-                3. Generating tokens one-by-one in an autoregressive manner
-                """)
+            
+    # Add some information about the model
+    with st.expander("About this model"):
+        st.write("""
+        This image captioning model combines a CLIP vision encoder with a Llama language model:
+        
+        - **Vision Encoder**: CLIP ViT-Base from OpenAI processes the image into visual features
+        - **Text Decoder**: Llama 3.2 1B Instruct model generates text based on the image features
+        - **Training**: The model was fine-tuned on the Flickr30k dataset using LoRA (Low-Rank Adaptation)
+        
+        The model works by:
+        1. Encoding the image using CLIP's vision model
+        2. Projecting image features to the text model's embedding space
+        3. Conditioning the language model on both the image features and input prompt
+        4. Generating a caption that follows the prompt and describes the image
+        """)
 
 if __name__ == "__main__":
     main()
