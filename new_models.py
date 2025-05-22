@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import CLIPVisionModel, LlamaForCausalLM, LlamaTokenizer, AutoTokenizer, AutoModelForCausalLM, CLIPModel, CLIPProcessor
 from peft import LoraConfig, get_peft_model
-import sentencepiece
+# import sentencepiece
 
 class LoraImageCaptioningModel(nn.Module):
     """
@@ -18,9 +18,9 @@ class LoraImageCaptioningModel(nn.Module):
         llm_model_name="meta-llama/Llama-3.2-1B",
         vision_embed_dim=1024,
         projection_dim=2048,  # Llama 3.2 1B hidden dimension
-        max_length=512,
-        lora_r=16,  # LoRA rank
-        lora_alpha=32,  # LoRA alpha scaling parameter
+        max_length=128,
+        lora_r=8,  # LoRA rank
+        lora_alpha=16,  # LoRA alpha scaling parameter
         lora_dropout=0.1,
         device=None
     ):
@@ -30,6 +30,7 @@ class LoraImageCaptioningModel(nn.Module):
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize CLIP vision encoder
+        self.image_processor = CLIPProcessor.from_pretrained(vision_model_name)
         self.vision_encoder = CLIPVisionModel.from_pretrained(vision_model_name)
         
         # Freeze the vision encoder parameters
@@ -38,11 +39,10 @@ class LoraImageCaptioningModel(nn.Module):
             
         # Initialize Llama 3.2 1B decoder
         self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.language_model = AutoModelForCausalLM.from_pretrained(
-            llm_model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.loss_ignore_index = -100
+        self.language_model = AutoModelForCausalLM.from_pretrained(llm_model_name)
         
         # Configure LoRA for efficient fine-tuning of the language model
         lora_config = LoraConfig(
@@ -80,9 +80,10 @@ class LoraImageCaptioningModel(nn.Module):
         with torch.no_grad():
             vision_outputs = self.vision_encoder(pixel_values=pixel_values)
             image_embeds = vision_outputs.pooler_output  # [batch_size, vision_embed_dim]
+            image_embeds = image_embeds.unsqueeze(1)  # [batch_size, 1, vision_embed_dim]
         
         # Project to match LLM's embedding dimension
-        image_embeds = self.image_projection(image_embeds)  # [batch_size, projection_dim]
+        image_embeds = self.image_projection(image_embeds)  # [batch_size, 1, projection_dim]
         return image_embeds
     
     def prepare_inputs(self, images, prompts):
@@ -98,7 +99,13 @@ class LoraImageCaptioningModel(nn.Module):
             image_embeds: Tensor of shape (batch_size, projection_dim)
         """
         # Encode images
-        image_embeds = self.encode_image(images)
+        image_inputs = self.image_processor(images=images, return_tensors="pt", do_rescale=False)
+        # print(f"prepare_inputs - image_inputs{image_inputs}")
+        pixel_values = image_inputs['pixel_values'].to(self.device)
+        # print(f"prepare_inputs - pixel_values.shape{pixel_values.shape}")
+        # print(f"prepare_inputs - pixel_values{pixel_values}")
+        image_embeds = self.encode_image(pixel_values) # [batch_size, projection_dim]
+        # image_embeds = image_embeds.unsqueeze(1) # [batch_size, seq_length (ie 1 pooled vector), projection_dim]
         
         # Tokenize prompts
         tokenized_inputs = self.tokenizer(
@@ -124,40 +131,92 @@ class LoraImageCaptioningModel(nn.Module):
             If labels are provided, returns the loss.
             Otherwise, returns logits of shape (batch_size, seq_length, vocab_size)
         """
+        # print(f"images.shape{images.shape}")
+        # print(f"images{images}")
+        # print(f"prompts.shape : no shape bc list")
+        # print(f"prompts{prompts}")
+        # print(f"labels.shape{labels.shape}")
+        # print(f"labels{labels}")
+
+
+        
         # Prepare inputs
         tokenized_inputs, image_embeds = self.prepare_inputs(images, prompts)
+        # print("=======================================")
+        # print(f"image_embeds.shape{image_embeds.shape}")
+        # print(f"image_embeds{image_embeds}")
+        # print(f"prompts tokenized_inputs.shape : None bc multiple inputs, not just token ids")
+        # print(f"prompts tokenized_inputs{tokenized_inputs}")
         
         # Extract inputs
         input_ids = tokenized_inputs.input_ids
         attention_mask = tokenized_inputs.attention_mask
+        # print(f"prompts input_ids.shape{input_ids.shape}")
+        # print(f"prompts input_ids{input_ids}")
+        # print(f"prompts attention_mask.shape{attention_mask.shape}")
+        # print(f"prompts attention_mask{attention_mask}")
         
         # Get llm embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)  
+        # print("=======================================")
+        # print(f"prompts inputs_embeds.shape{inputs_embeds.shape}")
+        # print(f"prompts inputs_embeds{inputs_embeds}")
         
-        # Prepend image embeddings to the first token embeddings of each sequence
+        # Prepend image embeddings as separate tokens
         batch_size = inputs_embeds.shape[0]
-        inputs_embeds[:, 0, :] = inputs_embeds[:, 0, :] + image_embeds
+        inputs_embeds = torch.cat([image_embeds, inputs_embeds], dim=1)  # [batch_size, 1+seq_length, hidden_size]
+        batch_size, seq_length, hidden_size = inputs_embeds.shape
+
+        # Extend the attention mask
+        image_attention = torch.ones((batch_size, 1), device=self.device, dtype=attention_mask.dtype)
+        attention_mask = torch.cat([image_attention, attention_mask], dim=1)
+        # print("=======================================")
+        # print(f"batch_size{batch_size}")
+        # print(f"prompts + image inputs_embeds.shape{inputs_embeds.shape}")
+        # print(f"prompts + image inputs_embeds{inputs_embeds}")
+        # print(f"prompts + image attention_mask.shape{attention_mask.shape}")
+        # print(f"prompts + image attention_mask{attention_mask}")
         
         if labels is not None:
+            if len(labels.shape) == 1:
+                labels = labels.unsqueeze(0)
             # Training mode with teacher forcing
-            
+            new_labels = torch.full((batch_size, 1 + labels.size(1)), self.loss_ignore_index, 
+                                    device=self.device, dtype=labels.dtype)
+            # print(f"new_labels.shape{new_labels.shape}")
+            # print(f"new_labels{new_labels}")
+            new_labels[:, 1:] = labels
+            # Then mask padding tokens
+            padding_mask = new_labels == self.tokenizer.pad_token_id
+            new_labels[padding_mask] = self.loss_ignore_index
+
+
             # Create causal attention mask (explicit, though this happens internally in the model too)
             # This ensures that each token can only attend to previous tokens during training
             seq_length = input_ids.size(1)
             causal_mask = torch.tril(
                 torch.ones((seq_length, seq_length), dtype=torch.bool, device=self.device)
             ).unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, seq_len, seq_len]
+            # print(f"for show : prompts causal_mask.shape{causal_mask.shape}")
+            # print(f"for show : prompts causal_mask{causal_mask}")
             
             # Forward pass through the language model with teacher forcing
             # Note: The model will use the causal mask internally for the loss calculation
             outputs = self.language_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
-                labels=labels,  # This activates teacher forcing and loss calculation
+                labels=new_labels,  # This activates teacher forcing and loss calculation
                 return_dict=True
             )
+            # print("=======================================")
+            # print(f"outputs.shape : no shape bc 'CausalLMOutputWithPast' object has no attribute 'shape'")
+            # print(f"outputs{outputs}")
             
             # Return loss for training
+            # print(f"outputs.logits.shape{outputs.logits.shape}")
+            # print(f"outputs.logits{outputs.logits}")
+            # print(f"outputs.loss.shape{outputs.loss.shape}")
+            # print(f"outputs.loss{outputs.loss}")
             return outputs.loss
         else:
             # Inference mode - no teacher forcing
@@ -168,6 +227,8 @@ class LoraImageCaptioningModel(nn.Module):
             )
             
             # Return logits for inference
+            # print(f"outputs.logits.shape{outputs.logits.shape}")
+            # print(f"outputs.logits{outputs.logits}")
             return outputs.logits
     
     def generate(self, images, prompts, max_new_tokens=100, **generate_kwargs):
@@ -193,8 +254,13 @@ class LoraImageCaptioningModel(nn.Module):
         # Get llm embeddings
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)  
         
-        # Prepend image embeddings to the first token embeddings of each sequence
-        inputs_embeds[:, 0, :] = inputs_embeds[:, 0, :] + image_embeds
+        # Prepend image embeddings as separate tokens
+        inputs_embeds = torch.cat([image_embeds, inputs_embeds], dim=1)  # [batch_size, 1+seq_length, hidden_size]
+
+        # Extend the attention mask
+        batch_size = inputs_embeds.shape[0]
+        image_attention = torch.ones((batch_size, 1), device=self.device, dtype=attention_mask.dtype)
+        attention_mask = torch.cat([image_attention, attention_mask], dim=1)
         
         # Note: During generation, the model internally applies causal masking
         # to ensure each new token only attends to previous tokens
@@ -208,6 +274,8 @@ class LoraImageCaptioningModel(nn.Module):
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
             use_cache=True,  # Enable KV caching for faster generation
             **generate_kwargs
         )
@@ -285,66 +353,3 @@ class LoraImageCaptioningModel(nn.Module):
         )
         
         return model
-
-# # Example usage
-# def example_usage():
-#     """Example of how to use the model for training and inference"""
-    
-#     # Initialize model
-#     model = LoraImageCaptioningModel()
-    
-#     # Example batch
-#     batch_size = 4
-#     image_size = 224
-#     images = torch.randn(batch_size, 3, image_size, image_size).to(model.device)
-#     prompts = ["Describe this image:", "What's happening in this picture?"] * 2
-    
-#     # Training example
-#     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
-    
-#     # Forward pass for training (with dummy labels)
-#     tokenized_labels = model.tokenizer(
-#         ["This is a cat sitting on a mat", "A dog running in the park"] * 2,
-#         padding="max_length",
-#         max_length=model.max_length,
-#         truncation=True,
-#         return_tensors="pt"
-#     ).input_ids.to(model.device)
-    
-#     loss = model(images, prompts, labels=tokenized_labels)
-    
-#     # Backward pass and optimization
-#     loss.backward()
-#     optimizer.step()
-#     optimizer.zero_grad()
-    
-#     # Inference example
-#     generate_kwargs = {
-#         "do_sample": True,
-#         "temperature": 0.7,
-#         "top_p": 0.9,
-#         "num_beams": 3,
-#     }
-    
-#     generated_texts = model.generate(
-#         images, 
-#         prompts,
-#         max_new_tokens=50,
-#         **generate_kwargs
-#     )
-    
-#     print("Generated captions:")
-#     for prompt, text in zip(prompts, generated_texts):
-#         print(f"Prompt: {prompt}")
-#         print(f"Generated: {text}\n")
-    
-#     # Save model
-#     model.save_pretrained("./saved_model")
-    
-#     # Load model
-#     loaded_model = LoraImageCaptioningModel.from_pretrained("./saved_model")
-    
-#     return model, loaded_model
-
-# if __name__ == "__main__":
-#     example_usage()

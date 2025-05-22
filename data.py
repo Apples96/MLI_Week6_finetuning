@@ -25,14 +25,6 @@ class Flickr30k(Dataset):
         # Load dataset from HuggingFace
         self.dataset = load_dataset("nlphuji/flickr30k", split=split)
         
-        # Build mapping from global index to (image_idx, caption_idx)
-        # This expands the dataset so each (image, caption) pair has its own index
-        self.indices_mapping = [
-            (img_idx, cap_idx)
-            for img_idx in range(len(self.dataset))
-            for cap_idx in range(len(self.dataset[img_idx]['caption']))
-        ]
-        
         # Standard image transformation pipeline for vision models
         self.transform = transforms.Compose([
             transforms.Resize(256),      # Resize to slightly larger than target
@@ -40,11 +32,11 @@ class Flickr30k(Dataset):
             transforms.ToTensor()        # Convert to tensor and scale to [0, 1]
         ])
         
-        print(f"Dataset initialized with {len(self.indices_mapping)} image-caption pairs")
+        print(f"Dataset initialized with {len(self.dataset)} image-caption pairs")
     
     def __len__(self):
         """Return the total number of image-caption pairs."""
-        return len(self.indices_mapping)
+        return len(self.dataset)
     
     def __getitem__(self, idx):
         """
@@ -58,13 +50,11 @@ class Flickr30k(Dataset):
                 - 'image': Transformed image tensor
                 - 'caption': Caption string
         """
-        # Get the image and caption indices from our mapping
-        img_idx, cap_idx = self.indices_mapping[idx]
         
         # Retrieve the item from the dataset
-        item = self.dataset[img_idx]
+        item = self.dataset[idx]
         image = item['image']
-        caption = item['caption'][cap_idx]
+        caption = item['caption'][0]
         
         # Apply transformation to image
         image = self.transform(image)

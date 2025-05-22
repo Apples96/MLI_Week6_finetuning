@@ -116,7 +116,7 @@ def train_lora_image_caption(
     )
 
     # Initialize model and move to device
-    model = LoraImageCaptioningModel().to(device)
+    model = LoraImageCaptioningModel(device=device)
 
     # Set up optimizer and loss function
     optimizer = Adam(model.parameters(), lr=learning_rate)
@@ -152,7 +152,8 @@ def train_lora_image_caption(
         progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs}")
         
         for batch_idx, batch in progress_bar:
-            batch_size = len(train_loader)
+            batch_size = batch['image'].shape[0]
+            # print(f"batch_size{batch_size}")
             # Zero gradients
             optimizer.zero_grad()
 
@@ -160,6 +161,12 @@ def train_lora_image_caption(
             images = batch["image"].to(device)
             prompts = ["What is in this picture ?"]*batch_size
             captions = batch["caption"]
+            # print(f"train.py images.shape{images.shape}")
+            # print(f"train.py images{images}")
+            # print(f"train.py prompts.len{len(prompts)} : no shape bc list")
+            # print(f"train.py prompts{prompts}")
+            # print(f"train.py captions.len{len(captions)} : no shape bc list")
+            # print(f"train.py captions{captions}")
 
             tokenized_labels = model.tokenizer(
                 captions,
@@ -167,8 +174,8 @@ def train_lora_image_caption(
                 max_length=model.max_length,
                 truncation=True,
                 return_tensors="pt"
-            ).input_ids.to(model.device)
-            # tokenized_labels[tokenized_labels == padding_token_id] = model.loss_ignore_index
+            ).input_ids.to(device)
+            tokenized_labels[tokenized_labels == padding_token_id] = model.loss_ignore_index
 
             # Forward pass
             loss = model(images, prompts, labels=tokenized_labels)
@@ -191,7 +198,7 @@ def train_lora_image_caption(
 
             if batch_idx % 50 == 0:
                 with torch.no_grad():
-                    debug_caption = model.generate([images[0]], ["What is in this image ?"])
+                    debug_caption = model.generate(images[0].unsqueeze(0), ["What is in this image ?"])
                     print(f"Debug caption: {debug_caption[0]}")
 
         # Calculate average training loss for the epoch
@@ -205,6 +212,8 @@ def train_lora_image_caption(
         with torch.no_grad():
             for batch in tqdm(val_loader, desc="Validating"):
                 # Get batch data
+                batch_size = batch['image'].shape[0]
+                # print(f"batch_size{batch_size}")
                 images = batch["image"].to(device)
                 prompts = ["What is in this picture ?"]*batch_size
                 captions = batch["caption"]
@@ -216,11 +225,11 @@ def train_lora_image_caption(
                     max_length=model.max_length,
                     truncation=True,
                     return_tensors="pt"
-                ).input_ids.to(model.device)
+                ).input_ids.to(device)
                 # tokenized_labels[tokenized_labels == padding_token_id] = model.loss_ignore_index >> this doesn't work
 
                 # Forward pass
-                loss = model(images, prompts, labels=tokenized_labels, use_internal_loss=True)
+                loss = model(images, prompts, labels=tokenized_labels)
                 
                 val_loss += loss.item()
                 val_batches += 1
@@ -262,7 +271,7 @@ def train_lora_image_caption(
             print("\nGenerating a sample caption with the trained model...")
             sample_batch = next(iter(val_loader))
             sample_image = sample_batch["image"][0:1].to(device)  # Take first image
-            sample_caption = model.generate(sample_image, ["Describe this image:"])
+            sample_caption = model.generate(sample_image, ["What is in this picture ?"])
             print(f"Sample generated caption: {sample_caption[0]}")
             wandb.log({"sample_caption": sample_caption[0]})
         except Exception as e:
@@ -279,8 +288,10 @@ def train_lora_image_caption(
     from io import BytesIO
     
     # Load a test image
-    response = requests.get("https://huggingface.co/datasets/sayakpaul/sample-datasets/resolve/main/dog.jpg")
-    image = Image.open(BytesIO(response.content)).convert("RGB")
+    images_dir = "images"  # Directory containing your PNG images
+    image_filename = "dogs.png"  # Replace with your actual image filename
+    image_path = os.path.join(images_dir, image_filename)
+    image = Image.open(image_path).convert("RGB")
     
     # Generate a caption
     captions = model.generate([image], ["Describe this image:"])
@@ -290,8 +301,8 @@ def train_lora_image_caption(
 if __name__ == "__main__":
     # This will run when the script is executed directly
     train_lora_image_caption(
-        batch_size=10,
-        num_epochs=5,
-        learning_rate=1e-4, 
-        max_samples=2000  # Use small sample for quick testing
+        batch_size=8,
+        num_epochs=8,
+        learning_rate=3e-5, 
+        max_samples=10000  # Use small sample for quick testing
     )
